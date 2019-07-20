@@ -42,9 +42,10 @@ class TransformerEmbed(nn.Module):
         return h
 
 class Transformer(nn.Module):
-    def __init__(self, embed_dim, hidden_dim, num_embeddings, num_max_positions, num_heads, num_layers, dropout):
+    def __init__(self, embed_dim, hidden_dim, num_embeddings, num_max_positions, num_heads, num_layers, dropout, bidirectional=False):
         super(Transformer, self).__init__()
         self.dropout = nn.Dropout(dropout)
+        self.bidirectional = bidirectional
 
         self.attentions = nn.ModuleList()
         self.feed_forwards = nn.ModuleList()
@@ -62,6 +63,9 @@ class Transformer(nn.Module):
         h = x
         attn_mask = torch.full((len(x), len(x)), -float('Inf'), device=h.device, dtype=h.dtype)
         attn_mask = torch.triu(attn_mask, diagonal=1)
+        if self.bidirectional:
+            attn_mask = torch.zeros_like(attn_mask)
+
         for layer_norm_1, attention, layer_norm_2, feed_forward in zip(self.layer_norms_1, self.attentions,
                                                                        self.layer_norms_2, self.feed_forwards):
             h = layer_norm_1(h)
@@ -80,6 +84,7 @@ class BlockTransformer(nn.Module):
     def __init__(self, config):
         super(BlockTransformer, self).__init__()
         self.config = config
+        # TODO: Fix config
         self.transformer_embed_h = TransformerEmbed(config.embed_dim, config.hidden_dim, config.num_embeddings,
                                                     config.num_max_positions, config.num_heads, config.num_layers,
                                                     config.dropout)
@@ -90,24 +95,24 @@ class BlockTransformer(nn.Module):
         self.transformer_h_f = nn.ModuleList()
         self.transformer_w_f = nn.ModuleList()
         self.transformer_proj = nn.ModuleList()
-        if self.config.bidirectional:
+        if self.config.forward_backward:
             self.transformer_h_b = nn.ModuleList()
             self.transformer_w_b = nn.ModuleList()
         for i in range(config.num_layers):
             self.transformer_h_f.append(Transformer(config.embed_dim, config.hidden_dim, config.num_embeddings,
                                            config.num_max_positions, config.num_heads, config.num_layers,
-                                           config.dropout))
-            if self.config.bidirectional:
+                                           config.dropout, bidirectional=config.bidirectional))
+            if self.config.forward_backward:
                 self.transformer_h_b.append(Transformer(config.embed_dim, config.hidden_dim, config.num_embeddings,
                                                config.num_max_positions, config.num_heads, config.num_layers,
-                                               config.dropout))
+                                               config.dropout, bidirectional=config.bidirectional))
             self.transformer_w_f.append(Transformer(config.embed_dim * config.image_size[0] // config.patch_size[0], config.hidden_dim, config.num_embeddings,
                                            config.num_max_positions, config.num_heads, config.num_layers,
-                                           config.dropout))
-            if self.config.bidirectional:
+                                           config.dropout, bidirectional=config.bidirectional))
+            if self.config.forward_backward:
                 self.transformer_w_b.append(Transformer(config.embed_dim * config.image_size[0] // config.patch_size[0], config.hidden_dim, config.num_embeddings,
                                                config.num_max_positions, config.num_heads, config.num_layers,
-                                               config.dropout))
+                                               config.dropout, bidirectional=config.bidirectional))
             self.transformer_proj.append(nn.Linear(2 * config.embed_dim, config.embed_dim))
         self.reduce_proj = nn.Linear(config.embed_dim, 10)
         # 1960 found empirically, will change per problem / input dimensionality
@@ -142,7 +147,7 @@ class BlockTransformer(nn.Module):
             # from here on, it should be 1 tenet "layer"
             h_h = self.transformer_h_f[i](inp)
             f_dim = h_h.shape[-1]
-            if self.config.bidirectional:
+            if self.config.forward_backward:
                 h_h = self.transformer_h_b[i](torch.flip(h_h, [0]))
                 h_h = torch.flip(h_h, [0])
             h_part = h_h.permute(2, 0, 1).reshape(f_dim, shp_h[0], shp_h[1], shp_h[2]).permute(2, 1, 3, 0).contiguous()
@@ -151,7 +156,7 @@ class BlockTransformer(nn.Module):
             # end result is [W, N, H * f_dim]
             h_part_to_w = h_part.permute(0, 2, 1, 3).reshape(shp[0], shp[2], shp[1] * f_dim).permute(1, 0, 2).contiguous()
             h_w = self.transformer_w_f[i](h_part_to_w)
-            if self.config.bidirectional:
+            if self.config.forward_backward:
                 h_w = self.transformer_w_b[i](torch.flip(h_w, [0]))
                 h_w = torch.flip(h_w, [0])
 
@@ -175,7 +180,10 @@ config = AttrDict()
 config.vocab = 256
 config.image_size = (28, 28)
 config.patch_size = (2, 2)
+# whether each transformer layer has directional masking
 config.bidirectional = True
+# whether to have 1 transformer (forward) or 2 (forward and backward)
+config.forward_backward = False
 config.status_every_n_minibatches = 500
 config.status_every_n_seconds = 30
 config.num_epochs = 100
@@ -185,7 +193,7 @@ config.batch_size = 13
 config.embed_dim = 40
 config.hidden_dim = 100
 #config.num_layers = 2
-#config.batch_size = 64
+#config.batch_size = 200
 #config.embed_dim = 100
 #config.hidden_dim = 512
 config.num_max_positions = 256
