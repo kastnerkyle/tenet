@@ -87,18 +87,27 @@ class BlockTransformer(nn.Module):
                                                     config.num_max_positions, config.num_heads, config.num_layers,
                                                     config.dropout)
 
-        self.transformer_h = nn.ModuleList()
-        self.transformer_w = nn.ModuleList()
+        self.transformer_h_f = nn.ModuleList()
+        self.transformer_w_f = nn.ModuleList()
         self.transformer_proj = nn.ModuleList()
+        if self.config.bidirectional:
+            self.transformer_h_b = nn.ModuleList()
+            self.transformer_w_b = nn.ModuleList()
         for i in range(config.num_layers):
-            self.transformer_h.append(Transformer(config.embed_dim, config.hidden_dim, config.num_embeddings,
+            self.transformer_h_f.append(Transformer(config.embed_dim, config.hidden_dim, config.num_embeddings,
                                            config.num_max_positions, config.num_heads, config.num_layers,
                                            config.dropout))
-            # im_size / patch
-            # TMP: hardcode
-            self.transformer_w.append(Transformer(config.embed_dim * 14, config.hidden_dim, config.num_embeddings,
+            if self.config.bidirectional:
+                self.transformer_h_b.append(Transformer(config.embed_dim, config.hidden_dim, config.num_embeddings,
+                                               config.num_max_positions, config.num_heads, config.num_layers,
+                                               config.dropout))
+            self.transformer_w_f.append(Transformer(config.embed_dim * config.image_size[0] // config.patch_size[0], config.hidden_dim, config.num_embeddings,
                                            config.num_max_positions, config.num_heads, config.num_layers,
                                            config.dropout))
+            if self.config.bidirectional:
+                self.transformer_w_b.append(Transformer(config.embed_dim * config.image_size[0] // config.patch_size[0], config.hidden_dim, config.num_embeddings,
+                                               config.num_max_positions, config.num_heads, config.num_layers,
+                                               config.dropout))
             self.transformer_proj.append(nn.Linear(2 * config.embed_dim, config.embed_dim))
         self.reduce_proj = nn.Linear(config.embed_dim, 10)
         # 1960 found empirically, will change per problem / input dimensionality
@@ -120,6 +129,7 @@ class BlockTransformer(nn.Module):
         x_h = x.permute(1, 0, 2).type(torch.LongTensor if self.config.device[:3] == "cpu" else torch.cuda.LongTensor)
         shp_h = x_h.shape
         x_h = x_h.reshape(shp_h[0], shp_h[1] * shp_h[2]).contiguous()
+        # x_w not currently used, but could be
         x_w = x.permute(2, 0, 1).type(torch.LongTensor if self.config.device[:3] == "cpu" else torch.cuda.LongTensor)
         shp_w = x_w.shape
         x_w = x_w.reshape(shp_w[0], shp_w[1] * shp_w[2]).contiguous()
@@ -130,14 +140,20 @@ class BlockTransformer(nn.Module):
         inp = x_e_h
         for i in range(self.config.num_layers):
             # from here on, it should be 1 tenet "layer"
-            h_h = self.transformer_h[i](inp)
+            h_h = self.transformer_h_f[i](inp)
             f_dim = h_h.shape[-1]
+            if self.config.bidirectional:
+                h_h = self.transformer_h_b[i](torch.flip(h_h, [0]))
+                h_h = torch.flip(h_h, [0])
             h_part = h_h.permute(2, 0, 1).reshape(f_dim, shp_h[0], shp_h[1], shp_h[2]).permute(2, 1, 3, 0).contiguous()
 
             # now need to swap axes and process h_part, being sure to push *all* the dims recurred over, into feature
             # end result is [W, N, H * f_dim]
             h_part_to_w = h_part.permute(0, 2, 1, 3).reshape(shp[0], shp[2], shp[1] * f_dim).permute(1, 0, 2).contiguous()
-            h_w = self.transformer_w[i](h_part_to_w)
+            h_w = self.transformer_w_f[i](h_part_to_w)
+            if self.config.bidirectional:
+                h_w = self.transformer_w_b[i](torch.flip(h_w, [0]))
+                h_w = torch.flip(h_w, [0])
 
             w_part = h_w.permute(1, 0, 2).reshape(shp[0], shp[2], shp[1], f_dim).permute(0, 2, 1, 3).contiguous()
 
@@ -157,7 +173,9 @@ class BlockTransformer(nn.Module):
 
 config = AttrDict()
 config.vocab = 256
+config.image_size = (28, 28)
 config.patch_size = (2, 2)
+config.bidirectional = True
 config.status_every_n_minibatches = 500
 config.status_every_n_seconds = 30
 config.num_epochs = 100
@@ -166,14 +184,14 @@ config.num_layers = 2
 config.batch_size = 13
 config.embed_dim = 40
 config.hidden_dim = 100
-#config.num_layers = 4
+#config.num_layers = 2
 #config.batch_size = 64
 #config.embed_dim = 100
 #config.hidden_dim = 512
 config.num_max_positions = 256
 config.num_embeddings = config.patch_size[0] * config.patch_size[1] * config.vocab
 config.num_heads = 10
-config.dropout = 0.1
+config.dropout = 0.0
 config.initializer_range = 0.02
 config.lr = 2.5E-4
 config.max_norm = 0.25
