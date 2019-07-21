@@ -180,12 +180,14 @@ config = AttrDict()
 config.vocab = 256
 config.image_size = (28, 28)
 config.patch_size = (2, 2)
-# whether each transformer layer has directional masking
+# whether each transformer layer has directional masking - bidirectional means no masking
 config.bidirectional = True
 # whether to have 1 transformer (forward) or 2 (forward and backward)
 config.forward_backward = False
 config.status_every_n_minibatches = 500
 config.status_every_n_seconds = 30
+config.delay_train_misclassification = 10
+config.delay_valid_misclassification = 0
 config.num_epochs = 100
 config.random_seed = 1999
 config.num_layers = 2
@@ -241,7 +243,17 @@ def make_all_batch_indices(dataset, batch_size, random_state=None):
     all_indices = [i for i in range(len(dataset))]
     if random_state is not None:
         random_state.shuffle(all_indices)
-    return zip(*[iter(all_indices)] * batch_size)
+    final_indices = []
+    i = 0
+    while True:
+        final_indices.append(tuple(all_indices[i:i + batch_size]))
+        if i + batch_size >= len(all_indices):
+            # ragged last batch
+            final_indices.append(tuple(all_indices[i:]))
+            break
+        i = i + batch_size
+    return final_indices
+
 
 def preprocess(minibatch):
     # make it into a single integer "feature"
@@ -253,9 +265,9 @@ def preprocess(minibatch):
 
 print("Start training")
 train_start = time.time()
-last_train_status_time = train_start
 epoch_losses = []
 for e in range(config.num_epochs):
+    last_train_status_time = time.time()
     running_loss = 0
     model.train()
     for n, inds in enumerate(make_all_batch_indices(train_data, config.batch_size, random_state)):
@@ -281,7 +293,59 @@ for e in range(config.num_epochs):
             last_train_status_time = time.time()
     print("Epoch {}: average loss {}".format(e, running_loss / (n + 1)))
     epoch_losses.append(running_loss / (n + 1))
-    # some kind of validation here?
+
+    model.eval()
+    with torch.no_grad():
+        print("Calculating misclassification rates...")
+        last_valid_status_time = time.time()
+        train_pred = []
+        train_true = []
+        all_inds  = make_all_batch_indices(train_data, config.batch_size, random_state)
+        for n, inds in enumerate(all_inds):
+            if e < config.delay_train_misclassification:
+                break
+            minibatch = preprocess(train_data[inds, ...]).to(config.device)
+            lbls = train_labels[inds, ...].to(config.device)
+            out = model(minibatch)
+            pred = torch.max(out, dim=-1)[1]
+            train_pred.extend([p for p in pred.data.cpu().numpy().ravel()])
+            train_true.extend([l for l in lbls.data.cpu().numpy().ravel()])
+            if time.time() - last_valid_status_time > config.status_every_n_seconds:
+                print("Calculating training misclassification rate, minibatch {} of {}".format(n + 1, len(all_inds)))
+                last_valid_status_time = time.time()
+
+        if e >= config.delay_train_misclassification:
+            assert len(train_pred) == len(train_true)
+            train_right_wrong = [1 if tp == tt else 0 for tp, tt in zip(train_pred, train_true)]
+            train_accuracy = sum(train_right_wrong) / float(len(train_true))
+            print("Epoch {} train accuracy: {}".format(e, train_accuracy))
+            print("Epoch {} train error: {}".format(e, 1 - train_accuracy))
+            print("")
+
+        last_valid_status_time = time.time()
+        valid_pred = []
+        valid_true = []
+        all_inds  = make_all_batch_indices(valid_data, config.batch_size, random_state)
+        for n, inds in enumerate(all_inds):
+            if e < config.delay_valid_misclassification:
+                break
+            minibatch = preprocess(valid_data[inds, ...]).to(config.device)
+            lbls = valid_labels[inds, ...].to(config.device)
+            out = model(minibatch)
+            pred = torch.max(out, dim=-1)[1]
+            valid_pred.extend([p for p in pred.data.cpu().numpy().ravel()])
+            valid_true.extend([l for l in lbls.data.cpu().numpy().ravel()])
+            if time.time() - last_valid_status_time > config.status_every_n_seconds:
+                print("Calculating validation misclassification rate, minibatch {} of {}".format(n + 1, len(all_inds)))
+                last_valid_status_time = time.time()
+
+        if e >= config.delay_valid_misclassification:
+            assert len(valid_pred) == len(valid_true)
+            valid_right_wrong = [1 if vp == vt else 0 for vp, vt in zip(valid_pred, valid_true)]
+            valid_accuracy = sum(valid_right_wrong) / float(len(valid_true))
+            print("Epoch {} valid accuracy: {}".format(e, valid_accuracy))
+            print("Epoch {} valid error: {}".format(e, 1 - valid_accuracy))
+            print("")
 
 """
 import matplotlib
