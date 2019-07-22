@@ -83,6 +83,7 @@ class Transformer(nn.Module):
 class BlockTransformer(nn.Module):
     def __init__(self, config):
         super(BlockTransformer, self).__init__()
+        self.dropout = nn.Dropout(config.dropout)
         self.config = config
         # TODO: Fix config
         self.transformer_embed_h = TransformerEmbed(config.embed_dim, config.hidden_dim, config.num_embeddings,
@@ -163,9 +164,12 @@ class BlockTransformer(nn.Module):
             w_part = h_w.permute(1, 0, 2).reshape(shp[0], shp[2], shp[1], f_dim).permute(0, 2, 1, 3).contiguous()
 
             comb = torch.cat([h_part, w_part], dim=-1)
+            comb = self.dropout(comb)
             proj_comb = nn.functional.relu(self.transformer_proj[i](comb))
+            proj_comb = self.dropout(proj_comb)
             proj_comb = proj_comb.permute(1, 3, 0, 2).reshape(shp[1], f_dim, shp[0] * shp[2]).permute(0, 2, 1).contiguous()
-            inp = inp + proj_comb
+            # inp = inp + proj_comb
+            inp = proj_comb
             # end of 1 tenet "layer"
 
         reduce_comb = nn.functional.relu(self.reduce_proj(proj_comb))
