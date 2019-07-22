@@ -115,9 +115,9 @@ class BlockTransformer(nn.Module):
                                                config.num_max_positions, config.num_heads, config.num_layers,
                                                config.dropout, bidirectional=config.bidirectional))
             self.transformer_proj.append(nn.Linear(2 * config.embed_dim, config.embed_dim))
-        self.reduce_proj = nn.Linear(config.embed_dim, 10)
+        self.reduce_proj = nn.Linear(config.embed_dim, config.out_dim)
         # 1960 found empirically, will change per problem / input dimensionality
-        self.out_proj = nn.Linear(1960, 10)
+        self.out_proj = nn.Linear(config.image_size[0] // config.patch_size[0] * config.image_size[1] // config.patch_size[1] * config.out_dim, config.out_dim)
         self.apply(self.init_weights)
 
     def init_weights(self, module):
@@ -183,7 +183,7 @@ class BlockTransformer(nn.Module):
 config = AttrDict()
 config.vocab = 256
 config.image_size = (28, 28)
-config.patch_size = (2, 2)
+config.patch_size = (1, 1)
 # whether each transformer layer has directional masking - bidirectional means no masking
 config.bidirectional = True
 # whether to have 1 transformer (forward) or 2 (forward and backward)
@@ -202,6 +202,7 @@ config.hidden_dim = 100
 #config.batch_size = 200
 #config.embed_dim = 100
 #config.hidden_dim = 512
+config.out_dim = 10
 config.num_max_positions = 256
 config.num_embeddings = config.patch_size[0] * config.patch_size[1] * config.vocab
 config.num_heads = 10
