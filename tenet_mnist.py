@@ -95,7 +95,9 @@ class BlockTransformer(nn.Module):
 
         self.transformer_h_f = nn.ModuleList()
         self.transformer_w_f = nn.ModuleList()
-        self.transformer_proj = nn.ModuleList()
+        self.transformer_i_proj = nn.ModuleList()
+        self.transformer_wh_proj = nn.ModuleList()
+        self.transformer_o_proj = nn.ModuleList()
         if self.config.forward_backward:
             self.transformer_h_b = nn.ModuleList()
             self.transformer_w_b = nn.ModuleList()
@@ -107,16 +109,19 @@ class BlockTransformer(nn.Module):
                 self.transformer_h_b.append(Transformer(config.embed_dim, config.hidden_dim, config.num_embeddings,
                                                config.num_max_positions, config.num_heads, config.num_layers,
                                                config.dropout, bidirectional=config.bidirectional))
-            self.transformer_w_f.append(Transformer(config.embed_dim * config.image_size[0] // config.patch_size[0], config.hidden_dim, config.num_embeddings,
+            # add intermediate projection
+            self.transformer_i_proj.append(nn.Linear(config.embed_dim * config.image_size[0] // config.patch_size[0], config.embed_dim))
+            self.transformer_w_f.append(Transformer(config.embed_dim, config.hidden_dim, config.num_embeddings,
                                            config.num_max_positions, config.num_heads, config.num_layers,
                                            config.dropout, bidirectional=config.bidirectional))
             if self.config.forward_backward:
-                self.transformer_w_b.append(Transformer(config.embed_dim * config.image_size[0] // config.patch_size[0], config.hidden_dim, config.num_embeddings,
+                self.transformer_w_b.append(Transformer(config.embed_dim, config.hidden_dim, config.num_embeddings,
                                                config.num_max_positions, config.num_heads, config.num_layers,
                                                config.dropout, bidirectional=config.bidirectional))
-            self.transformer_proj.append(nn.Linear(2 * config.embed_dim, config.embed_dim))
+            # project it back to the size needed H * f_dim 
+            self.transformer_wh_proj.append(nn.Linear(config.embed_dim, config.embed_dim * config.image_size[0] // config.patch_size[0]))
+            self.transformer_o_proj.append(nn.Linear(config.embed_dim, config.embed_dim))
         self.reduce_proj = nn.Linear(config.embed_dim, config.out_dim)
-        # 1960 found empirically, will change per problem / input dimensionality
         self.out_proj = nn.Linear(config.image_size[0] // config.patch_size[0] * config.image_size[1] // config.patch_size[1] * config.out_dim, config.out_dim)
         self.apply(self.init_weights)
 
@@ -156,19 +161,21 @@ class BlockTransformer(nn.Module):
             # now need to swap axes and process h_part, being sure to push *all* the dims recurred over, into feature
             # end result is [W, N, H * f_dim]
             h_part_to_w = h_part.permute(0, 2, 1, 3).reshape(shp[0], shp[2], shp[1] * f_dim).permute(1, 0, 2).contiguous()
-            h_w = self.transformer_w_f[i](h_part_to_w)
+            h_part_to_w_proj = self.transformer_i_proj[i](h_part_to_w)
+            h_w = self.transformer_w_f[i](h_part_to_w_proj)
             if self.config.forward_backward:
                 h_w = self.transformer_w_b[i](torch.flip(h_w, [0]))
                 h_w = torch.flip(h_w, [0])
 
-            w_part = h_w.permute(1, 0, 2).reshape(shp[0], shp[2], shp[1], f_dim).permute(0, 2, 1, 3).contiguous()
+            # proj back to H * f_dim, then reshape it all back to image-like
+            h_w_proj = self.transformer_wh_proj[i](h_w)
+            w_part = h_w_proj.permute(1, 0, 2).reshape(shp[0], shp[2], shp[1], f_dim).permute(0, 2, 1, 3).contiguous()
 
-            comb = torch.cat([h_part, w_part], dim=-1)
-            comb = self.dropout(comb)
-            proj_comb = nn.functional.relu(self.transformer_proj[i](comb))
+            #comb = torch.cat([h_part, w_part], dim=-1)
+            comb = self.dropout(w_part)
+            proj_comb = nn.functional.relu(self.transformer_o_proj[i](comb))
             proj_comb = self.dropout(proj_comb)
             proj_comb = proj_comb.permute(1, 3, 0, 2).reshape(shp[1], f_dim, shp[0] * shp[2]).permute(0, 2, 1).contiguous()
-            # inp = inp + proj_comb
             inp = proj_comb
             # end of 1 tenet "layer"
 
