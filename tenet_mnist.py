@@ -27,17 +27,34 @@ def extract_blocks(a, blocksize):
     a = a.contiguous()
     return a.reshape(N, C, H // b0, b0, W // b1, b1).transpose(3,4).reshape(N, C, H // b0, W // b1, b0, b1).permute(0, 2, 3, 1, 4, 5).contiguous()
 
-class TransformerEmbed(nn.Module):
+class TransformerPositionEmbed(nn.Module):
     def __init__(self, embed_dim, hidden_dim, num_embeddings, num_max_positions, num_heads, num_layers, dropout):
-        super(TransformerEmbed, self).__init__()
-        self.tokens_embeddings = nn.Embedding(num_embeddings, embed_dim)
+        super(TransformerPositionEmbed, self).__init__()
         self.position_embeddings = nn.Embedding(num_max_positions, embed_dim)
+    def forward(self, x):
+        positions = torch.arange(len(x), device=x.device).unsqueeze(-1)
+        h = self.position_embeddings(positions)
+        return h
+
+class TransformerTokenEmbed(nn.Module):
+    def __init__(self, embed_dim, hidden_dim, num_embeddings, num_max_positions, num_heads, num_layers, dropout):
+        super(TransformerTokenEmbed, self).__init__()
+        self.tokens_embeddings = nn.Embedding(num_embeddings, embed_dim)
+    def forward(self, x):
+        h = self.tokens_embeddings(x)
+        return h
+
+class TransformerCombinedEmbed(nn.Module):
+    def __init__(self, embed_dim, hidden_dim, num_embeddings, num_max_positions, num_heads, num_layers, dropout):
+        super(TransformerCombinedEmbed, self).__init__()
+        self.position = TransformerPositionEmbed(embed_dim, hidden_dim, num_embeddings, num_max_positions, num_heads, num_layers, dropout)
+        self.token = TransformerTokenEmbed(embed_dim, hidden_dim, num_embeddings, num_max_positions, num_heads, num_layers, dropout)
         self.dropout = nn.Dropout(dropout)
 
     def forward(self, x):
-        positions = torch.arange(len(x), device=x.device).unsqueeze(-1)
-        h = self.tokens_embeddings(x)
-        h = h + self.position_embeddings(positions).expand_as(h)
+        ht = self.token(x)
+        hp = self.position(x).expand_as(ht)
+        h = hp + ht
         h = self.dropout(h)
         return h
 
@@ -85,14 +102,13 @@ class BlockTransformer(nn.Module):
         super(BlockTransformer, self).__init__()
         self.dropout = nn.Dropout(config.dropout)
         self.config = config
-        # TODO: Fix config
-        self.transformer_embed_h = TransformerEmbed(config.embed_dim, config.hidden_dim, config.num_embeddings,
-                                                    config.num_max_positions, config.num_heads, config.num_layers,
-                                                    config.dropout)
-        self.transformer_embed_w = TransformerEmbed(config.embed_dim, config.hidden_dim, config.num_embeddings,
-                                                    config.num_max_positions, config.num_heads, config.num_layers,
-                                                    config.dropout)
+        self.transformer_initial_token_embed = TransformerTokenEmbed(config.embed_dim, config.hidden_dim, config.num_embeddings,
+                                                                     config.num_max_positions, config.num_heads, config.num_layers,
+                                                                     config.dropout)
 
+
+        self.transformer_embed_h = nn.ModuleList()
+        self.transformer_embed_w = nn.ModuleList()
         self.transformer_h_f = nn.ModuleList()
         self.transformer_w_f = nn.ModuleList()
         self.transformer_i_proj = nn.ModuleList()
@@ -102,6 +118,12 @@ class BlockTransformer(nn.Module):
             self.transformer_h_b = nn.ModuleList()
             self.transformer_w_b = nn.ModuleList()
         for i in range(config.num_layers):
+            self.transformer_embed_h.append(TransformerPositionEmbed(config.embed_dim, config.hidden_dim, config.num_embeddings,
+                                                        config.num_max_positions, config.num_heads, config.num_layers,
+                                                        config.dropout))
+            self.transformer_embed_w.append(TransformerPositionEmbed(config.embed_dim, config.hidden_dim, config.num_embeddings,
+                                                        config.num_max_positions, config.num_heads, config.num_layers,
+                                                        config.dropout))
             self.transformer_h_f.append(Transformer(config.embed_dim, config.hidden_dim, config.num_embeddings,
                                            config.num_max_positions, config.num_heads, config.num_layers,
                                            config.dropout, bidirectional=config.bidirectional))
@@ -122,7 +144,9 @@ class BlockTransformer(nn.Module):
             self.transformer_wh_proj.append(nn.Linear(config.embed_dim, config.embed_dim * config.image_size[0] // config.patch_size[0]))
             self.transformer_o_proj.append(nn.Linear(config.embed_dim, config.embed_dim))
         self.reduce_proj = nn.Linear(config.embed_dim, config.out_dim)
-        self.out_proj = nn.Linear(config.image_size[0] // config.patch_size[0] * config.image_size[1] // config.patch_size[1] * config.out_dim, config.out_dim)
+        self.out_l1 = nn.Linear(config.image_size[0] // config.patch_size[0] * config.image_size[1] // config.patch_size[1] * config.out_dim, config.hidden_dim)
+        self.out_l2 = nn.Linear(config.hidden_dim, config.hidden_dim)
+        self.out_proj = nn.Linear(config.hidden_dim, config.out_dim)
         self.apply(self.init_weights)
 
     def init_weights(self, module):
@@ -140,17 +164,22 @@ class BlockTransformer(nn.Module):
         x_h = x.permute(1, 0, 2).type(torch.LongTensor if self.config.device[:3] == "cpu" else torch.cuda.LongTensor)
         shp_h = x_h.shape
         x_h = x_h.reshape(shp_h[0], shp_h[1] * shp_h[2]).contiguous()
+        """
         # x_w not currently used, but could be
         x_w = x.permute(2, 0, 1).type(torch.LongTensor if self.config.device[:3] == "cpu" else torch.cuda.LongTensor)
         shp_w = x_w.shape
         x_w = x_w.reshape(shp_w[0], shp_w[1] * shp_w[2]).contiguous()
-
-        x_e_h = self.transformer_embed_h(x_h)
         x_e_w = self.transformer_embed_w(x_w)
+        """
+
+        x_e_h = self.transformer_initial_token_embed(x_h)
 
         inp = x_e_h
         for i in range(self.config.num_layers):
             # from here on, it should be 1 tenet "layer"
+            inp = inp + self.transformer_embed_h[i](inp)
+            inp = self.dropout(inp)
+
             h_h = self.transformer_h_f[i](inp)
             f_dim = h_h.shape[-1]
             if self.config.forward_backward:
@@ -162,6 +191,8 @@ class BlockTransformer(nn.Module):
             # end result is [W, N, H * f_dim]
             h_part_to_w = h_part.permute(0, 2, 1, 3).reshape(shp[0], shp[2], shp[1] * f_dim).permute(1, 0, 2).contiguous()
             h_part_to_w_proj = self.transformer_i_proj[i](h_part_to_w)
+            h_part_to_w_proj = h_part_to_w_proj + self.transformer_embed_w[i](h_part_to_w_proj)
+            h_part_to_w_proj = self.dropout(h_part_to_w_proj)
             h_w = self.transformer_w_f[i](h_part_to_w_proj)
             if self.config.forward_backward:
                 h_w = self.transformer_w_b[i](torch.flip(h_w, [0]))
@@ -183,7 +214,12 @@ class BlockTransformer(nn.Module):
         p_dim = reduce_comb.shape[-1]
         reduce_comb = reduce_comb.permute(2, 0, 1).reshape(p_dim, shp[1], shp[0], shp[2]).permute(2, 1, 3, 0)
         flat = reduce_comb.reshape(shp[0], -1)
-        out = self.out_proj(flat)
+        # 2 layer final projection
+        l1 = nn.functional.relu(self.out_l1(flat))
+        l1 = self.dropout(l1)
+        l2 = nn.functional.relu(self.out_l2(l1))
+        l2 = self.dropout(l2)
+        out = self.out_proj(l2)
         return out
 
 
@@ -269,6 +305,8 @@ def make_all_batch_indices(dataset, batch_size, random_state=None):
 
 def preprocess(minibatch):
     # make it into a single integer "feature"
+    minibatch[minibatch > 20] = 255
+    minibatch[minibatch <= 20] = 0
     for i in range(minibatch.shape[-1]):
         minibatch[:, :, :, i] += i * config.vocab
 
