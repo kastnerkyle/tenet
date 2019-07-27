@@ -237,19 +237,15 @@ config.delay_train_misclassification = 10
 config.delay_valid_misclassification = 0
 config.num_epochs = 100
 config.random_seed = 1999
-config.num_layers = 2
-config.batch_size = 13
-config.embed_dim = 40
-config.hidden_dim = 100
-#config.num_layers = 2
-#config.batch_size = 200
-#config.embed_dim = 100
-#config.hidden_dim = 512
+config.num_layers = 1
+config.batch_size = 20 #200
+config.embed_dim = 100
+config.hidden_dim = 200
 config.out_dim = 10
 config.num_max_positions = 256
 config.num_embeddings = config.patch_size[0] * config.patch_size[1] * config.vocab
 config.num_heads = 10
-config.dropout = 0.0
+config.dropout = 0.5
 config.initializer_range = 0.02
 config.lr = 2.5E-4
 config.max_norm = 0.25
@@ -266,13 +262,21 @@ train_data = train.train_data
 train_labels = train.train_labels
 train_data = train_data[:, :, :, None]
 
-valid = datasets.MNIST('./data', train=False, download=True)
-valid_data = valid.test_data
-valid_labels = valid.test_labels
-valid_data = valid_data[:, :, :, None]
+
+valsplit = 50000
+valid_data = train_data[valsplit:]
+valid_labels = train_labels[valsplit:]
+train_data = train_data[:valsplit]
+train_labels = train_labels[:valsplit]
+
+test = datasets.MNIST('./data', train=False, download=True)
+test_data = test.test_data
+test_labels = test.test_labels
+test_data = test_data[:, :, :, None]
 
 train_data = extract_blocks(train_data, config.patch_size)
 valid_data = extract_blocks(valid_data, config.patch_size)
+test_data = extract_blocks(test_data, config.patch_size)
 
 shp = train_data.shape
 patch_shape = shp[-3:]
@@ -280,6 +284,9 @@ train_data = train_data.reshape(shp[0], shp[1], shp[2], -1)
 
 shp = valid_data.shape
 valid_data = valid_data.reshape(shp[0], shp[1], shp[2], -1)
+
+shp = test_data.shape
+test_data = test_data.reshape(shp[0], shp[1], shp[2], -1)
 
 features = train_data.shape[-1]
 
@@ -313,13 +320,36 @@ def preprocess(minibatch):
     minibatch = minibatch.sum(dim=-1)
     return minibatch
 
+def dataset_accuracy(data, labels, name=""):
+    last_status_time = time.time()
+    pred = []
+    true = []
+    all_inds  = make_all_batch_indices(data, config.batch_size, random_state)
+    for n, inds in enumerate(all_inds):
+        minibatch = preprocess(data[inds, ...]).to(config.device)
+        this_lbls = labels[inds, ...].to(config.device)
+        out = model(minibatch)
+        # calculate loss since we are doing it anyways?
+        this_pred = torch.max(out, dim=-1)[1]
+        pred.extend([p for p in this_pred.data.cpu().numpy().ravel()])
+        true.extend([l for l in this_lbls.data.cpu().numpy().ravel()])
+        if time.time() - last_status_time > config.status_every_n_seconds:
+            print("Calculating {} misclassification rate, minibatch {} of {}".format(name, n + 1, len(all_inds)))
+            last_status_time = time.time()
+    assert len(pred) == len(true)
+    right_wrong = [1 if p == t else 0 for p, t in zip(pred, true)]
+    accuracy = sum(right_wrong) / float(len(true))
+    return accuracy
+
+
 print("Start training")
 train_start = time.time()
-epoch_losses = []
+epoch_results = []
 for e in range(config.num_epochs):
     last_train_status_time = time.time()
     running_loss = 0
     model.train()
+    this_epoch_results = {"epoch": e + 1}
     for n, inds in enumerate(make_all_batch_indices(train_data, config.batch_size, random_state)):
         minibatch = preprocess(train_data[inds, ...]).to(config.device)
         lbls = train_labels[inds, ...].to(config.device)
@@ -333,8 +363,8 @@ for e in range(config.num_epochs):
 
         opt.step()
         running_loss += loss.data.cpu().numpy()
-        if len(epoch_losses) == 0:
-            epoch_losses.append(running_loss)
+        if len(epoch_results) == 0:
+            epoch_results.append({"epoch": 0, "train_loss": running_loss})
         if (n + 1) % config.status_every_n_minibatches == 0:
             print("Minibatch {} in Epoch {}: average loss so far {}".format(n + 1, e, running_loss / (n + 1)))
             last_train_status_time = time.time()
@@ -342,68 +372,50 @@ for e in range(config.num_epochs):
             print("Minibatch {} in Epoch {}: average loss so far {}".format(n + 1, e, running_loss / (n + 1)))
             last_train_status_time = time.time()
     print("Epoch {}: average loss {}".format(e, running_loss / (n + 1)))
-    epoch_losses.append(running_loss / (n + 1))
+
+    this_epoch_results["train_loss"] = running_loss / (n + 1)
 
     model.eval()
     with torch.no_grad():
         print("Calculating misclassification rates...")
-        last_valid_status_time = time.time()
-        train_pred = []
-        train_true = []
-        all_inds  = make_all_batch_indices(train_data, config.batch_size, random_state)
-        for n, inds in enumerate(all_inds):
-            if e < config.delay_train_misclassification:
-                break
-            minibatch = preprocess(train_data[inds, ...]).to(config.device)
-            lbls = train_labels[inds, ...].to(config.device)
-            out = model(minibatch)
-            pred = torch.max(out, dim=-1)[1]
-            train_pred.extend([p for p in pred.data.cpu().numpy().ravel()])
-            train_true.extend([l for l in lbls.data.cpu().numpy().ravel()])
-            if time.time() - last_valid_status_time > config.status_every_n_seconds:
-                print("Calculating training misclassification rate, minibatch {} of {}".format(n + 1, len(all_inds)))
-                last_valid_status_time = time.time()
-
         if e >= config.delay_train_misclassification:
-            assert len(train_pred) == len(train_true)
-            train_right_wrong = [1 if tp == tt else 0 for tp, tt in zip(train_pred, train_true)]
-            train_accuracy = sum(train_right_wrong) / float(len(train_true))
+            train_accuracy = dataset_accuracy(train_data, train_labels, name="train")
+            this_epoch_results["train_accuracy"] = train_accuracy
+            this_epoch_results["train_error"] = 1 - train_accuracy
             print("Epoch {} train accuracy: {}".format(e, train_accuracy))
             print("Epoch {} train error: {}".format(e, 1 - train_accuracy))
             print("")
 
-        last_valid_status_time = time.time()
-        valid_pred = []
-        valid_true = []
-        all_inds  = make_all_batch_indices(valid_data, config.batch_size, random_state)
-        for n, inds in enumerate(all_inds):
-            if e < config.delay_valid_misclassification:
-                break
-            minibatch = preprocess(valid_data[inds, ...]).to(config.device)
-            lbls = valid_labels[inds, ...].to(config.device)
-            out = model(minibatch)
-            pred = torch.max(out, dim=-1)[1]
-            valid_pred.extend([p for p in pred.data.cpu().numpy().ravel()])
-            valid_true.extend([l for l in lbls.data.cpu().numpy().ravel()])
-            if time.time() - last_valid_status_time > config.status_every_n_seconds:
-                print("Calculating validation misclassification rate, minibatch {} of {}".format(n + 1, len(all_inds)))
-                last_valid_status_time = time.time()
-
         if e >= config.delay_valid_misclassification:
-            assert len(valid_pred) == len(valid_true)
-            valid_right_wrong = [1 if vp == vt else 0 for vp, vt in zip(valid_pred, valid_true)]
-            valid_accuracy = sum(valid_right_wrong) / float(len(valid_true))
+            valid_accuracy = dataset_accuracy(valid_data, valid_labels, name="valid")
+            this_epoch_results["valid_accuracy"] = valid_accuracy
+            this_epoch_results["valid_error"] = 1 - valid_accuracy
             print("Epoch {} valid accuracy: {}".format(e, valid_accuracy))
             print("Epoch {} valid error: {}".format(e, 1 - valid_accuracy))
             print("")
 
-"""
-import matplotlib
-matplotlib.use("Agg")
-import matplotlib.pyplot as plt
-f, axarr = plt.subplots(2, 2)
-for i in range(axarr.shape[0]):
-   for j in range(axarr.shape[1]):
-       axarr[i, j].imshow(patches[i, j, 0])
-plt.savefig("tmp.png")
-"""
+        # if it's the best valid score so far, also run test perf ("early stopping")
+        valid_error_so_far = [er["valid_error"] if "valid_error" in er.keys() else np.inf for er in epoch_results]
+        best_valid_error_so_far = min(valid_error_so_far)
+        train_error_so_far = [er["train_error"] if "train_error" in er.keys() else np.inf for er in epoch_results]
+        best_train_error_so_far = min(train_error_so_far)
+
+        # be sure we have hit the point of testing that variable at least once
+        do_test = False
+        if e >= config.delay_valid_misclassification:
+            if this_epoch_results["valid_error"] < best_valid_error_so_far:
+                do_test = True
+        """
+        # don't do it on best train
+        elif e >= config.delay_train_misclassification:
+            if this_epoch_results["train_error"] < best_train_error_so_far:
+                do_test = True
+        """
+
+        if do_test:
+            test_accuracy = dataset_accuracy(test_data, test_labels, name="test")
+            this_epoch_results["test_accuracy"] = test_accuracy
+            this_epoch_results["test_error"] = 1 - test_accuracy
+            print("Epoch {} test accuracy: {}".format(e, test_accuracy))
+            print("Epoch {} test error: {}".format(e, 1 - test_accuracy))
+            print("")
