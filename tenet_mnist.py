@@ -371,13 +371,14 @@ for e in range(config.num_epochs):
         elif time.time() - last_train_status_time > config.status_every_n_seconds:
             print("Minibatch {} in Epoch {}: average loss so far {}".format(n + 1, e, running_loss / (n + 1)))
             last_train_status_time = time.time()
+    print("")
     print("Epoch {}: average loss {}".format(e, running_loss / (n + 1)))
+    print("")
 
     this_epoch_results["train_loss"] = running_loss / (n + 1)
 
     model.eval()
     with torch.no_grad():
-        print("Calculating misclassification rates...")
         if e >= config.delay_valid_misclassification:
             valid_accuracy = dataset_accuracy(valid_data, valid_labels, name="valid")
             this_epoch_results["valid_accuracy"] = valid_accuracy
@@ -402,6 +403,8 @@ for e in range(config.num_epochs):
                 do_test = False
 
         if do_test:
+            print("Epoch {} early stopping: new valid minima found".format(e))
+            print("")
             train_accuracy = dataset_accuracy(train_data, train_labels, name="train")
             this_epoch_results["train_accuracy"] = train_accuracy
             this_epoch_results["train_error"] = 1 - train_accuracy
