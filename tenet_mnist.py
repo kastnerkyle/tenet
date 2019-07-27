@@ -233,8 +233,8 @@ config.bidirectional = True
 config.forward_backward = False
 config.status_every_n_minibatches = 500
 config.status_every_n_seconds = 30
-config.delay_train_misclassification = 10
 config.delay_valid_misclassification = 0
+config.delay_early_stop_testing = 15
 config.num_epochs = 100
 config.random_seed = 1999
 config.num_layers = 1
@@ -378,14 +378,6 @@ for e in range(config.num_epochs):
     model.eval()
     with torch.no_grad():
         print("Calculating misclassification rates...")
-        if e >= config.delay_train_misclassification:
-            train_accuracy = dataset_accuracy(train_data, train_labels, name="train")
-            this_epoch_results["train_accuracy"] = train_accuracy
-            this_epoch_results["train_error"] = 1 - train_accuracy
-            print("Epoch {} train accuracy: {}".format(e, train_accuracy))
-            print("Epoch {} train error: {}".format(e, 1 - train_accuracy))
-            print("")
-
         if e >= config.delay_valid_misclassification:
             valid_accuracy = dataset_accuracy(valid_data, valid_labels, name="valid")
             this_epoch_results["valid_accuracy"] = valid_accuracy
@@ -400,22 +392,29 @@ for e in range(config.num_epochs):
         train_error_so_far = [er["train_error"] if "train_error" in er.keys() else np.inf for er in epoch_results]
         best_train_error_so_far = min(train_error_so_far)
 
-        # be sure we have hit the point of testing that variable at least once
         do_test = False
         if e >= config.delay_valid_misclassification:
             if this_epoch_results["valid_error"] < best_valid_error_so_far:
                 do_test = True
-        """
-        # don't do it on best train
-        elif e >= config.delay_train_misclassification:
-            if this_epoch_results["train_error"] < best_train_error_so_far:
-                do_test = True
-        """
+
+            if e < config.delay_early_stop_testing:
+                # disable these tests based on config
+                do_test = False
 
         if do_test:
+            train_accuracy = dataset_accuracy(train_data, train_labels, name="train")
+            this_epoch_results["train_accuracy"] = train_accuracy
+            this_epoch_results["train_error"] = 1 - train_accuracy
+            print("Epoch {} train accuracy: {}".format(e, train_accuracy))
+            print("Epoch {} train error: {}".format(e, 1 - train_accuracy))
+            print("")
+
             test_accuracy = dataset_accuracy(test_data, test_labels, name="test")
             this_epoch_results["test_accuracy"] = test_accuracy
             this_epoch_results["test_error"] = 1 - test_accuracy
             print("Epoch {} test accuracy: {}".format(e, test_accuracy))
             print("Epoch {} test error: {}".format(e, 1 - test_accuracy))
             print("")
+
+        # this line is crucial 
+        epoch_results.append(this_epoch_results)
